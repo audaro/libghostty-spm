@@ -50,6 +50,33 @@ import sys
 xcframework = sys.argv[1]
 info_path = os.path.join(xcframework, "Info.plist")
 
+# Which slice set this artifact is supposed to have. The expectation exists to
+# catch a slice that silently lost an architecture, so it has to name the set
+# that was actually asked for: Script/build-platform.sh's `tether` group builds
+# two single-arch iOS slices, which the upstream table reads as a missing
+# x86_64 simulator. An unknown profile is a hard error rather than a fallback.
+profile = os.environ.get("XCFRAMEWORK_PROFILE", "upstream")
+expected_by_profile = {
+    "upstream": {
+        ("macos", None): {"arm64", "x86_64"},
+        ("ios", None): {"arm64"},
+        ("ios", "maccatalyst"): {"arm64", "x86_64"},
+        ("ios", "simulator"): {"arm64", "x86_64"},
+        ("xros", None): {"arm64"},
+        ("xros", "simulator"): {"arm64", "x86_64"},
+    },
+    # Tether's app is iOS-only and every machine in its loop is Apple Silicon.
+    # Stricter than the upstream table, not looser: a slice this profile does
+    # not build is refused outright below.
+    "tether": {
+        ("ios", None): {"arm64"},
+        ("ios", "simulator"): {"arm64"},
+    },
+}
+if profile not in expected_by_profile:
+    raise SystemExit(f"[!] unknown XCFRAMEWORK_PROFILE: {profile}")
+expected_table = expected_by_profile[profile]
+
 if not os.path.isfile(info_path):
     raise SystemExit(f"[!] missing xcframework Info.plist: {info_path}")
 
@@ -102,14 +129,12 @@ for library in libraries:
             f"plist={sorted(declared_architectures)} archive={sorted(actual_architectures)}"
         )
 
-    expected_architectures = {
-        ("macos", None): {"arm64", "x86_64"},
-        ("ios", None): {"arm64"},
-        ("ios", "maccatalyst"): {"arm64", "x86_64"},
-        ("ios", "simulator"): {"arm64", "x86_64"},
-        ("xros", None): {"arm64"},
-        ("xros", "simulator"): {"arm64", "x86_64"},
-    }.get((platform, platform_variant))
+    expected_architectures = expected_table.get((platform, platform_variant))
+    if expected_architectures is None and profile != "upstream":
+        raise SystemExit(
+            f"[!] {identifier} is not a slice the {profile} profile builds: "
+            f"platform={platform} variant={platform_variant}"
+        )
     if expected_architectures is not None and actual_architectures != expected_architectures:
         raise SystemExit(
             f"[!] {identifier} architectures must be {sorted(expected_architectures)}, "
@@ -123,5 +148,5 @@ for library in libraries:
     if "module libghostty" not in modulemap:
         raise SystemExit(f"[!] {identifier} module map does not declare module libghostty")
 
-print(f"[*] verified static-library xcframework layout and architectures: {xcframework}")
+print(f"[*] verified static-library xcframework layout and architectures ({profile}): {xcframework}")
 PY

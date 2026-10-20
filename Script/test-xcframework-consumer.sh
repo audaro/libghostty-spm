@@ -89,18 +89,50 @@ test_build() {
     fi
 }
 
+# The destinations are the ones this artifact actually has slices for: a
+# consumer build for a platform the xcframework does not carry fails at the
+# link with a missing-library error that reads nothing like its cause, and an
+# iOS-only artifact (Script/build-platform.sh's `tether` group) carries two.
+# A slice with no destination mapped is a hard error, not a silent skip.
+DESTINATIONS=$(python3 - "$WORK_DIR/Consumer/BinaryTarget/GhosttyKit.xcframework" <<'PY'
+import os
+import plistlib
+import sys
+
+xcframework = sys.argv[1]
+with open(os.path.join(xcframework, "Info.plist"), "rb") as handle:
+    info = plistlib.load(handle)
+
+destinations = {
+    ("macos", None): "generic/platform=macOS",
+    ("ios", "maccatalyst"): "generic/platform=macOS,variant=Mac Catalyst",
+    ("ios", None): "generic/platform=iOS",
+    ("ios", "simulator"): "generic/platform=iOS Simulator",
+    ("xros", None): "generic/platform=visionOS",
+    ("xros", "simulator"): "generic/platform=visionOS Simulator",
+}
+
+selected = []
+for library in info["AvailableLibraries"]:
+    key = (library.get("SupportedPlatform"), library.get("SupportedPlatformVariant"))
+    destination = destinations.get(key)
+    if destination is None:
+        raise SystemExit(f"[!] no consumer destination known for slice: {key}")
+    if destination not in selected:
+        selected.append(destination)
+
+if not selected:
+    raise SystemExit("[!] xcframework carries no slices")
+
+print("\n".join(selected))
+PY
+)
+
 (
     cd "$WORK_DIR/Consumer"
-    test_build "generic/platform=macOS"
-    test_build "generic/platform=macOS,variant=Mac Catalyst"
-    test_build "generic/platform=iOS"
-    test_build "generic/platform=iOS Simulator"
-    if [ -d "$WORK_DIR/Consumer/BinaryTarget/GhosttyKit.xcframework/xros-arm64" ]; then
-        test_build "generic/platform=visionOS"
-        test_build "generic/platform=visionOS Simulator"
-    else
-        echo "[*] xcframework has no xros slice, skipping visionOS destinations"
-    fi
+    while IFS= read -r destination; do
+        test_build "$destination"
+    done <<< "$DESTINATIONS"
 )
 
 echo "[*] xcframework consumer tests passed"
