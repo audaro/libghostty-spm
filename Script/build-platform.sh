@@ -88,6 +88,19 @@ case "$PLATFORM_GROUP" in
             "aarch64-ios-simulator@apple_a17" \
             "x86_64-ios-simulator"
         ;;
+    # Tether's group: the two slices its app actually consumes, and nothing
+    # else. No `@apple_a17` on the simulator slice — the `ios` group above
+    # gives the simulator an A17 baseline, and every machine this is
+    # developed and gated on is an M1, which may trap on an instruction that
+    # baseline assumes. No x86_64 simulator slice for the same reason: there
+    # is no Intel Mac in the loop, and an unused slice is build minutes and
+    # an extra member list to audit.
+    tether)
+        build_variant "iphoneos" \
+            "aarch64-ios"
+        build_variant "iphonesimulator" \
+            "aarch64-ios-simulator"
+        ;;
     maccatalyst)
         build_variant "maccatalyst" \
             "aarch64-maccatalyst@apple_a17" \
@@ -115,7 +128,7 @@ case "$PLATFORM_GROUP" in
             "x86_64-watchos-simulator"
         ;;
     *)
-        echo "[!] unknown platform group: $PLATFORM_GROUP. Expected one of: macos, ios, maccatalyst, tvos, visionos, watchos"
+        echo "[!] unknown platform group: $PLATFORM_GROUP. Expected one of: macos, ios, tether, maccatalyst, tvos, visionos, watchos"
         exit 1
         ;;
 esac

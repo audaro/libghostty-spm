@@ -15,6 +15,19 @@ ZIG_TARGET=${2:-}
 OUTPUT_DIR=${3:-}
 ZIG_CPU=${ZIG_CPU:-}
 ZIG_BUILD_EXTRA_ARGS=${ZIG_BUILD_EXTRA_ARGS:-}
+TETHER_I18N=${TETHER_I18N:-false}
+
+# -Di18n is the whole point of this fork, so it is a fixed flag below and not
+# something a caller passes through $ZIG_BUILD_EXTRA_ARGS: a flag that can be
+# forgotten is exactly the failure this fork exists to prevent. It is an
+# environment variable only so the i18n=true control build is expressible, and
+# it defaults to false — forgetting it gives the safe answer, and the only way
+# to link libintl is to ask for it by name. Anything but true/false is refused
+# here rather than thirty seconds into a Zig build.
+if [ "$TETHER_I18N" != "true" ] && [ "$TETHER_I18N" != "false" ]; then
+    echo "[!] TETHER_I18N must be true or false: $TETHER_I18N"
+    exit 1
+fi
 
 if [ -z "$SOURCE_DIR" ] || [ -z "$ZIG_TARGET" ] || [ -z "$OUTPUT_DIR" ]; then
     echo "Usage: $0 <source_dir> <zig_target> <output_dir>"
@@ -82,7 +95,11 @@ CURRENT_STAMP=$(
     {
         git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "no-source-rev"
         zig version 2>/dev/null || echo "no-zig"
-        echo "$ZIG_TARGET" "${ZIG_OPTIMIZE:-ReleaseFast}"
+        # TETHER_I18N is in the stamp because it changes the compiled output:
+        # without it the i18n=true control build reuses the i18n=false cache and
+        # produces an identical archive, so the differential diffs to nothing and
+        # reads as a refuted premise rather than a stale cache.
+        echo "$ZIG_TARGET" "${ZIG_OPTIMIZE:-ReleaseFast}" "$TETHER_I18N"
         # Patch *content*, not just names -- editing a patch in place must
         # invalidate, which a filename listing would miss.
         cat "$ROOT_DIR"/Patches/ghostty/* 2>/dev/null
@@ -125,6 +142,7 @@ ZIG_BUILD_COMMAND=(
     -Dsentry=false
     -Dcustom-shaders=false
     -Dinspector=false
+    -Di18n=$TETHER_I18N
     -Dtarget="$ZIG_TARGET"
 )
 

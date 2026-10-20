@@ -157,6 +157,32 @@ to move back.
   its own — a bare insert with no such guard, which is how it once produced
   `duplicate switch value` on all ten targets.
 
+- `0018-gate-libintl-on-i18n.sh` — `src/build/SharedDeps.zig`: gate the
+  bundled libintl link on the existing `i18n` build option. This is the one
+  patch in the stack that exists for a licence reason rather than a build
+  one. `pkg/libintl` is GNU gettext plus gnulib, LGPL-2.1-or-later, and
+  upstream's comment above the link says so — its compliance argument is
+  that an end user can edit the build script and relink, which a
+  closed-source App Store binary cannot offer. `-Di18n=false` alone does not
+  help: it gates every *call site* (`src/os/i18n.zig`'s `init`,
+  `initGlobalDomain`, `_()` and `canonicalizeLocale` all open with
+  `if (comptime !build_config.i18n)`) and the `.mo` install steps, but the
+  link itself is unconditional for every Darwin target, so
+  `GhosttyLib.initStatic`'s `CombineArchivesStep` merges the thirty
+  gettext/gnulib objects into `libghostty.a` either way — measured on the
+  19 MB prebuilt `ios-arm64` slice, which carries all thirty. What makes
+  removing the link safe is those same comptime guards: the four `extern fn`
+  declarations are unreferenced under `i18n=false` and
+  `canonicalizeLocale`'s fallback is a pure-Zig copy, so nothing needs a
+  replacement libintl. The patch asserts all four preconditions (the Config
+  option, the `build_config` export and at least four guarded call sites)
+  before touching anything and refuses the tree if any is missing, because
+  the day upstream reworks i18n this must stop silently and not quietly
+  produce an unlinkable archive. With `-Di18n=true` — what
+  `Script/build-ghostty.sh`'s `TETHER_I18N=true` control build passes — the
+  line is upstream's, unchanged, which is what makes the differential in
+  `.github/workflows/tether-build.yml` a real control.
+
 Dropped once upstream carried them: `0014-free-text-signature.patch`
 (`ghostty_surface_free_text` taking the surface, upstream `4803d58b`). A
 patch that only "already applies" is a liability — the day its context
