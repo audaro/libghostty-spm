@@ -37,7 +37,6 @@ jobs:
     runs-on: macos-15
     outputs:
       build_needed: ${{ steps.release.outputs.build_needed }}
-      manifest_needed: ${{ steps.release.outputs.manifest_needed }}
       ghostty_ref: ${{ steps.release.outputs.ghostty_ref }}
       tether_tag: ${{ steps.release.outputs.tether_tag }}
     steps:
@@ -65,41 +64,23 @@ jobs:
           if ! git rev-parse "refs/tags/$TETHER_TAG" >/dev/null 2>&1; then
             echo "[*] building $GHOSTTY_REF -> $TETHER_TAG"
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
-            echo "manifest_needed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # The tag existing is not the same as the job being done, and the
-          # difference is the one state this fork must never sit in. A release
-          # has to exist before a manifest can name its URL, so a run that dies
-          # in between leaves the asset published and Package.swift still
-          # pointing at the previous one -- which here is upstream's, the asset
-          # with the gettext and gnulib members in it. Exiting green on the
-          # retry is what would make that permanent, so the manifest is checked
-          # against the published bytes rather than inferred from the tag.
-          #
-          # Two commands, not one pipeline: the status of `cmd | sed` is sed's,
-          # so a refusal from the script would be masked by a successful sed.
-          STATE_OUTPUT=$(./Script/tether-publish-manifest.sh check "$TETHER_TAG")
-          printf '%s\n' "$STATE_OUTPUT"
-          STATE=$(printf '%s\n' "$STATE_OUTPUT" | sed -n 's/^state=//p')
-
+          # The tag exists, which is not the same as the job being done -- so
+          # the question is asked of the artifact and the manifest rather than
+          # of the tag: does the committed Package.swift name this tag's asset,
+          # and are the published bytes the ones it names? `verify` answers
+          # both and exits 1 with the remedy if either is wrong. There is
+          # deliberately no repair path. The checksum may only ever come from a
+          # zip this workflow built and audited, that zip dies with its run, and
+          # a recovery job that adopted whatever was attached to the tag would
+          # be able to point a consumer at bytes nothing had audited -- which is
+          # the failure this fork exists to make impossible, reachable through a
+          # green run.
           echo "build_needed=false" >> "$GITHUB_OUTPUT"
-          case "$STATE" in
-            complete)
-              echo "[*] $TETHER_TAG is published and the manifest points at it: nothing to do"
-              echo "manifest_needed=false" >> "$GITHUB_OUTPUT"
-              ;;
-            manifest-stale)
-              echo "[*] $TETHER_TAG is published but the manifest is stale: repairing it"
-              echo "[*] without a rebuild. The asset was audited before it was released."
-              echo "manifest_needed=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "[!] unrecognised state from tether-publish-manifest.sh: '$STATE'"
-              exit 1
-              ;;
-          esac
+          ./Script/tether-publish-manifest.sh verify "$TETHER_TAG"
+          echo "[*] $TETHER_TAG is finished: nothing to do"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TETHER_REPO: ${{ github.repository }}
@@ -328,6 +309,31 @@ jobs:
       - name: Stage Asset
         run: mv ./build/GhosttyKit.xcframework.zip ./GhosttyKit.xcframework.zip
 
+      - name: Render Manifest
+        # Before the release, not after, and from the zip this job built and
+        # audited. The URL is deterministic, so it does not need the release to
+        # exist yet; the checksum must not come from anywhere else. See the
+        # header of Script/tether-publish-manifest.sh for why that ordering is
+        # the safety property and not a detail.
+        run: |
+          ./Script/tether-publish-manifest.sh render \
+            "${{ needs.prepare.outputs.tether_tag }}" \
+            "$PWD/GhosttyKit.xcframework.zip"
+        env:
+          TETHER_REPO: ${{ github.repository }}
+
+      - name: Commit Manifest
+        run: |
+          if git diff --quiet -- Package.swift; then
+            echo "[*] Package.swift already points at this asset"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "tether: point Package.swift at ${{ needs.prepare.outputs.tether_tag }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+
       - name: Create Tether Release
         uses: softprops/action-gh-release@v3
         with:
@@ -356,67 +362,16 @@ jobs:
             members--i18n-true--aarch64-ios.txt
             expected-libintl-objects.txt
 
-      - name: Render And Verify Manifest
-        # Renders Package.swift from the asset downloaded back out of the
-        # release, so its checksum is by construction the checksum of the bytes
-        # GitHub serves, and compares those bytes with the zip this job built --
-        # which is the check that the upload was not truncated.
+      - name: Verify The Published Asset
+        # The last word on this run: the bytes GitHub serves must be the zip
+        # this job built, which is also the checksum the manifest already
+        # carries. A failure here leaves a manifest naming bytes that are not
+        # published -- which fails closed in a consumer's checkout rather than
+        # resolving to something unaudited.
         run: |
-          ./Script/tether-publish-manifest.sh render \
+          ./Script/tether-publish-manifest.sh verify \
             "${{ needs.prepare.outputs.tether_tag }}" \
             "$PWD/GhosttyKit.xcframework.zip"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TETHER_REPO: ${{ github.repository }}
-
-      - name: Commit Manifest
-        run: |
-          if git diff --quiet -- Package.swift; then
-            echo "[*] Package.swift already points at this asset"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Package.swift
-          git commit -m "tether: point Package.swift at ${{ needs.prepare.outputs.tether_tag }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-
-  finish-release:
-    # The recovery path, and the only job that runs when the build does not.
-    # prepare reaches here when the release is published but the manifest does
-    # not name it: a previous run died between creating the release and
-    # committing the manifest. Nothing is rebuilt, because nothing needs to be
-    # -- every audit in this workflow, including the post-merge one on the
-    # slices that actually ship, runs before the release is created, so a
-    # published asset has already passed all of them.
-    needs: prepare
-    if: needs.prepare.outputs.build_needed == 'false' && needs.prepare.outputs.manifest_needed == 'true'
-    runs-on: macos-15
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Render And Verify Manifest
-        run: |
-          ./Script/tether-publish-manifest.sh render \
-            "${{ needs.prepare.outputs.tether_tag }}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TETHER_REPO: ${{ github.repository }}
-
-      - name: Commit Manifest
-        run: |
-          if git diff --quiet -- Package.swift; then
-            echo "[!] Package.swift did not change, but prepare said the manifest was stale."
-            echo "[!] Something else is writing this file; not reporting success on a no-op."
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Package.swift
-          git commit -m "tether: point Package.swift at ${{ needs.prepare.outputs.tether_tag }}"
-          git push origin "HEAD:${{ github.ref_name }}"
