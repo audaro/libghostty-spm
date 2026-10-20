@@ -1,0 +1,365 @@
+name: Build Tether XCFramework
+
+# Builds the two iOS slices Tether consumes from the pinned upstream Ghostty
+# commit (Ghostty.ref) with -Di18n=false and
+# Patches/ghostty/0018-gate-libintl-on-i18n.sh, and publishes them on the
+# `tether-<sha12>-<Tether.build>` release tag (Script/tether-tag.sh).
+#
+# Why this workflow exists rather than build.yml: Tether ships closed-source on
+# the App Store, and upstream's artifact statically links pkg/libintl — GNU
+# gettext plus gnulib, LGPL-2.1-or-later — into every slice. The flag plus the
+# patch remove it. Every claim in that sentence is checked here on the artifact
+# rather than asserted from the source:
+#
+#   * each shipped archive is audited for libintl members and for any gettext
+#     symbol, defined or undefined (Script/tether-audit-archive.sh);
+#   * one aarch64-ios archive is also built with -Di18n=true as a control, and
+#     the member sets are subtracted (Script/tether-i18n-diff.sh). The
+#     differential must be exactly pkg/libintl's object set: an empty diff
+#     fails, because an empty diff is indistinguishable from a flag that never
+#     reached the link.
+#
+# The control is not optional and there is no input to skip it. An audit whose
+# matching rules have never been seen to match anything is not evidence.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-tether
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: macos-15
+    outputs:
+      build_needed: ${{ steps.release.outputs.build_needed }}
+      ghostty_ref: ${{ steps.release.outputs.ghostty_ref }}
+      tether_tag: ${{ steps.release.outputs.tether_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse GPL Text
+        run: ./Script/check-licenses.sh
+
+      - name: Resolve Upstream Commit
+        id: release
+        run: |
+          GHOSTTY_REF=$(tr -d '[:space:]' < Ghostty.ref)
+          TETHER_TAG=$(./Script/tether-tag.sh)
+
+          gh api "repos/ghostty-org/ghostty/commits/$GHOSTTY_REF" --jq '.sha' >/dev/null
+
+          git fetch --tags origin
+          if git rev-parse "refs/tags/$TETHER_TAG" >/dev/null 2>&1; then
+            echo "[*] $TETHER_TAG already published, nothing to build"
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "[*] building $GHOSTTY_REF -> $TETHER_TAG"
+          echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          echo "ghostty_ref=$GHOSTTY_REF" >> "$GITHUB_OUTPUT"
+          echo "tether_tag=$TETHER_TAG" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-target:
+    needs: prepare
+    if: needs.prepare.outputs.build_needed == 'true'
+    # macos-15, not macos-26, and deliberately: build-ghostty.sh ends in a
+    # direct `xcrun libtool -static` over every static_libs member, and
+    # Xcode 27's libtool silently drops Zig's 2-byte-aligned members — the
+    # failure 0013-host-toolchain.sh exists to route around inside Ghostty's
+    # own LibtoolStep. Upstream builds targets on macos-15 and only merges on
+    # macos-26; this follows that split for the same reason.
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-ios
+            variant: iphoneos
+          - target: aarch64-ios-simulator
+            variant: iphonesimulator
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Zig
+        # Keep in sync with minimum_zig_version in the pinned upstream's
+        # build.zig.zon; a version drift fails every target at once.
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Clone Ghostty
+        run: |
+          git clone https://github.com/ghostty-org/ghostty ./References/ghostty-upstream
+          git -C ./References/ghostty-upstream checkout "${{ needs.prepare.outputs.ghostty_ref }}"
+
+      - name: Build Target
+        run: |
+          export TETHER_I18N=false
+          ./Script/build-ghostty.sh \
+            "$PWD/References/ghostty-upstream" \
+            "${{ matrix.target }}" \
+            "$PWD/build/out"
+
+      - name: Audit Archive
+        run: |
+          ./Script/tether-libintl-objects.sh "$PWD/References/ghostty-upstream" \
+            > "$PWD/build/expected-libintl-objects.txt"
+          cp "$PWD/build/expected-libintl-objects.txt" ./expected-libintl-objects.txt
+          ./Script/tether-audit-archive.sh \
+            "$PWD/build/out/lib/libghostty.a" \
+            "$PWD/build/expected-libintl-objects.txt" \
+            absent \
+            "$PWD/members--${{ matrix.target }}.txt"
+
+      - name: Pack Artifact
+        run: tar -czf "target--${{ matrix.variant }}--${{ matrix.target }}.tar.gz" -C ./build/out .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: target--${{ matrix.variant }}--${{ matrix.target }}
+          path: target--${{ matrix.variant }}--${{ matrix.target }}.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Member List
+        uses: actions/upload-artifact@v4
+        with:
+          name: members--${{ matrix.target }}
+          path: |
+            members--${{ matrix.target }}.txt
+            expected-libintl-objects.txt
+          retention-days: 7
+
+  control:
+    needs: prepare
+    if: needs.prepare.outputs.build_needed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Clone Ghostty
+        run: |
+          git clone https://github.com/ghostty-org/ghostty ./References/ghostty-upstream
+          git -C ./References/ghostty-upstream checkout "${{ needs.prepare.outputs.ghostty_ref }}"
+
+      - name: Build Control
+        # The same target the first matrix leg builds, with i18n left on. This
+        # is upstream's own build of that slice; it is never published, and its
+        # only product is a member list to subtract from.
+        run: |
+          export TETHER_I18N=true
+          ./Script/build-ghostty.sh \
+            "$PWD/References/ghostty-upstream" \
+            aarch64-ios \
+            "$PWD/build/out"
+
+      - name: Audit Control
+        run: |
+          ./Script/tether-libintl-objects.sh "$PWD/References/ghostty-upstream" \
+            > "$PWD/build/expected-libintl-objects.txt"
+          ./Script/tether-audit-archive.sh \
+            "$PWD/build/out/lib/libghostty.a" \
+            "$PWD/build/expected-libintl-objects.txt" \
+            present \
+            "$PWD/members--i18n-true--aarch64-ios.txt"
+
+      - name: Upload Control Member List
+        uses: actions/upload-artifact@v4
+        with:
+          name: members--i18n-true--aarch64-ios
+          path: members--i18n-true--aarch64-ios.txt
+          retention-days: 7
+
+  merge-release:
+    needs: [prepare, build-target, control]
+    if: needs.prepare.outputs.build_needed == 'true'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./build/artifacts
+
+      - name: Differential
+        # The control, and the reason this build is trustworthy at all. It runs
+        # before the release is cut: a slice that cannot be shown to differ from
+        # upstream's by exactly pkg/libintl publishes nothing.
+        run: |
+          ./Script/tether-i18n-diff.sh \
+            ./build/artifacts/members--aarch64-ios/members--aarch64-ios.txt \
+            ./build/artifacts/members--i18n-true--aarch64-ios/members--i18n-true--aarch64-ios.txt \
+            ./build/artifacts/members--aarch64-ios/expected-libintl-objects.txt \
+            ./ghostty-i18n-diff.txt
+          cp ./build/artifacts/members--aarch64-ios/members--aarch64-ios.txt ./
+          cp ./build/artifacts/members--aarch64-ios-simulator/members--aarch64-ios-simulator.txt ./
+          cp ./build/artifacts/members--i18n-true--aarch64-ios/members--i18n-true--aarch64-ios.txt ./
+          cp ./build/artifacts/members--aarch64-ios/expected-libintl-objects.txt ./
+
+      - name: Assemble Variants
+        run: |
+          mkdir -p ./build/targets ./build/dest
+
+          for tarball in ./build/artifacts/target--*/target--*.tar.gz; do
+            BASENAME=$(basename "$tarball" .tar.gz)
+            VARIANT=$(echo "$BASENAME" | awk -F'--' '{print $2}')
+            TARGET=$(echo "$BASENAME" | awk -F'--' '{print $3}')
+            echo "[*] unpacking $BASENAME -> variant=$VARIANT target=$TARGET"
+            mkdir -p "./build/targets/$VARIANT/$TARGET"
+            tar -xzf "$tarball" -C "./build/targets/$VARIANT/$TARGET"
+          done
+
+          for variant_dir in ./build/targets/*/; do
+            VARIANT=$(basename "$variant_dir")
+            mkdir -p "./build/dest/$VARIANT/lib" "./build/dest/$VARIANT/include"
+
+            LIBS=()
+            FIRST_HEADERS=
+            for target_dir in "$variant_dir"*/; do
+              LIBS+=("$target_dir/lib/libghostty.a")
+              if [ -z "$FIRST_HEADERS" ]; then
+                FIRST_HEADERS="$target_dir/include"
+              fi
+            done
+
+            cp -R "$FIRST_HEADERS/." "./build/dest/$VARIANT/include/"
+
+            if [ "${#LIBS[@]}" -eq 1 ]; then
+              cp "${LIBS[0]}" "./build/dest/$VARIANT/lib/libghostty.a"
+              echo "[*] $VARIANT: single arch"
+            else
+              lipo -create "${LIBS[@]}" -output "./build/dest/$VARIANT/lib/libghostty.a"
+              echo "[*] $VARIANT: lipo ${#LIBS[@]} archs"
+            fi
+          done
+
+      - name: Merge XCFramework
+        env:
+          XCFRAMEWORK_PROFILE: tether
+        run: |
+          ./Script/merge-xcframework.sh \
+            "$PWD/build/dest" \
+            "$PWD/BinaryTarget/GhosttyKit.xcframework" \
+            "$PWD/build/GhosttyKit.xcframework.zip"
+
+      - name: Audit Merged Slices
+        # The merge is where an archive can lose members without saying so:
+        # `xcodebuild -create-xcframework` copies, but lipo and libtool have
+        # both been seen to drop Zig's oddly-aligned members. Re-auditing the
+        # slices inside the artifact that actually ships is the only audit that
+        # speaks about what ships.
+        run: |
+          for slice in ./BinaryTarget/GhosttyKit.xcframework/*/; do
+            IDENTIFIER=$(basename "$slice")
+            ./Script/tether-audit-archive.sh \
+              "$PWD/$slice/libghostty.a" \
+              "$PWD/expected-libintl-objects.txt" \
+              absent \
+              "$PWD/members--merged--$IDENTIFIER.txt"
+          done
+
+      - name: Test XCFramework Consumer
+        run: ./Script/test-xcframework-consumer.sh "$PWD/BinaryTarget/GhosttyKit.xcframework"
+
+      - name: Stage Asset
+        run: mv ./build/GhosttyKit.xcframework.zip ./GhosttyKit.xcframework.zip
+
+      - name: Create Tether Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tether_tag }}
+          target_commitish: ${{ github.ref_name }}
+          body: |
+            GhosttyKit XCFramework for Tether — built with `-Di18n=false` and
+            `Patches/ghostty/0018-gate-libintl-on-i18n.sh`, so no GNU gettext or
+            gnulib object is linked into it.
+
+            Ghostty commit: https://github.com/ghostty-org/ghostty/commit/${{ needs.prepare.outputs.ghostty_ref }}
+            Slices: iOS (arm64), iOS Simulator (arm64)
+
+            `ghostty-i18n-diff.txt` is the member differential against the same
+            slice built with `-Di18n=true`: the two archives differ by exactly
+            pkg/libintl's object set and nothing else. The `members--*.txt`
+            lists are `ar t` over each archive, and no archive here defines or
+            references a gettext symbol.
+          draft: false
+          prerelease: false
+          files: |
+            GhosttyKit.xcframework.zip
+            ghostty-i18n-diff.txt
+            members--aarch64-ios.txt
+            members--aarch64-ios-simulator.txt
+            members--i18n-true--aarch64-ios.txt
+            expected-libintl-objects.txt
+
+      - name: Render Manifest
+        run: |
+          ./Script/build-manifest.sh \
+            "$PWD/GhosttyKit.xcframework.zip" \
+            "https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tether_tag }}/GhosttyKit.xcframework.zip"
+
+      - name: Verify The Published Asset
+        # The manifest's checksum is computed from the local zip, so on its own
+        # it says nothing about the bytes GitHub will serve. Download the asset
+        # back and check the two agree before the manifest is committed.
+        run: |
+          gh release download "${{ needs.prepare.outputs.tether_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern GhosttyKit.xcframework.zip \
+            --dir ./build/published
+          LOCAL=$(shasum -a 256 ./GhosttyKit.xcframework.zip | awk '{print $1}')
+          PUBLISHED=$(shasum -a 256 ./build/published/GhosttyKit.xcframework.zip | awk '{print $1}')
+          if [ "$LOCAL" != "$PUBLISHED" ]; then
+            echo "[!] the published asset does not match what was built: $PUBLISHED != $LOCAL"
+            exit 1
+          fi
+          if ! grep -q "$LOCAL" Package.swift; then
+            echo "[!] Package.swift does not carry the asset checksum $LOCAL"
+            exit 1
+          fi
+          echo "[*] published asset and manifest checksum agree: $LOCAL"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit Manifest
+        run: |
+          if git diff --quiet -- Package.swift; then
+            echo "[*] Package.swift already points at this asset"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "tether: point Package.swift at ${{ needs.prepare.outputs.tether_tag }}"
+          git push origin "HEAD:${{ github.ref_name }}"
