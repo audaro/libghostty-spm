@@ -128,6 +128,23 @@ public final class TerminalSurface {
         ghostty_surface_mouse_scroll(s, x, y, mods)
     }
 
+    /// Sends a pointer pressure stage, as a force-sensitive trackpad does.
+    ///
+    /// A `.deep` press while the left button is down is ghostty's
+    /// force-click: it selects the word under the original press and ends
+    /// the click sequence, so the next press is a fresh single click rather
+    /// than a repeat or a shift-extend (Surface.zig `mousePressureCallback`,
+    /// SelectionGesture.zig `deepPress`). A stage equal to the last one sent
+    /// is ignored, so send `.none` afterwards to make the next `.deep` count.
+    public func sendMousePressure(_ stage: TerminalMousePressureStage, pressure: Double = 0) {
+        guard let s = surface else {
+            TerminalDebugLog.log(.input, "surface mouse pressure ignored: missing surface")
+            return
+        }
+        TerminalDebugLog.log(.input, "surface mousePressure stage=\(stage) pressure=\(pressure)")
+        ghostty_surface_mouse_pressure(s, stage.rawValue, pressure)
+    }
+
     /// Whether the application currently owns the mouse (DEC 1000/1002/1003).
     /// Host UI (copy menu, context menu) must not steal a click while this
     /// is true. Ghostty still owns reporting vs local selection for events
@@ -273,6 +290,25 @@ public final class TerminalSurface {
 
     public func readSelection() -> String? {
         readSelectionResult()?.text
+    }
+
+    /// The selection's first and last cell in the viewport, or `nil` when
+    /// there is no selection or none of it is visible — ghostty reports the
+    /// latter as a top-left pixel of `-1` (embedded.zig `readTextLocked`).
+    public func readSelectionBounds() -> TerminalSelectionBounds? {
+        guard let s = surface else {
+            TerminalDebugLog.log(.input, "surface readSelectionBounds ignored: missing surface")
+            return nil
+        }
+        var out = ghostty_text_s()
+        guard ghostty_surface_read_selection(s, &out) else { return nil }
+        defer { ghostty_surface_free_text(s, &out) }
+        guard out.tl_px_x >= 0, out.tl_px_y >= 0 else { return nil }
+        return TerminalSelectionBounds(
+            offsetStart: out.offset_start,
+            offsetLength: out.offset_len,
+            columns: ghostty_surface_size(s).columns
+        )
     }
 
     func readSelectionResult() -> SelectionResult? {

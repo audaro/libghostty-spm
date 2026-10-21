@@ -1,8 +1,12 @@
 # Why this fork exists
 
 This is a fork of [`Lakr233/libghostty-spm`](https://github.com/Lakr233/libghostty-spm)
-that exists for exactly one reason, and it is a licence reason rather than a
-technical one.
+that exists for a licence reason first, and since 2026-10-21 for one small
+technical one as well: a Swift surface Tether needs that the wrapper keeps
+`internal`. The licence reason comes first in every sense — it is why the fork
+exists, and it is what the build below verifies. The Swift additions are
+described after it, under their own heading, so that neither is mistaken for
+the other.
 
 Tether is a closed-source iOS app. The upstream package's prebuilt
 `libghostty.a` statically links `pkg/libintl` — GNU gettext plus a handful of
@@ -39,8 +43,9 @@ never automatically.
 
 ## The diff from upstream
 
-Six files, and nothing else. Everything here is additive except two scripts
-whose hardcoded expectations assumed the upstream target set.
+For the licence gate, the files below and nothing else; for Tether's Swift
+surface, the three under the next heading. Everything here is additive except
+two scripts whose hardcoded expectations assumed the upstream target set.
 
 - **`Patches/ghostty/0018-gate-libintl-on-i18n.sh`** (new) — wraps the libintl
   `lazyDependency` block in `src/build/SharedDeps.zig` in
@@ -83,6 +88,35 @@ whose hardcoded expectations assumed the upstream target set.
   not build is refused), the second from the artifact's own `Info.plist`. A
   slice with no destination mapped is an error rather than a silent skip.
 - **`.github/workflows/tether-build.yml`** (new) — the build, below.
+
+### The Swift surface Tether reads
+
+Added 2026-10-21 for Tether's selection handles, which have to know where the
+selection's two ends are drawn. ghostty already reports that —
+`ghostty_surface_read_selection` fills `offset_start` and `offset_len`, the
+top-left and bottom-right cells as linear viewport indices — and the wrapper
+already reads both into `TerminalSurface.readSelectionResult()`, which is
+`internal`. Inferring the ends from the selected text instead would be wrong on
+every wide character, which is one character and two cells.
+
+- **`Sources/GhosttyTerminal/Surface/TerminalSelectionBounds.swift`** (new) —
+  the first and last selected cell, built from those two offsets and the grid
+  width; `nil` for a grid with no columns.
+- **`TerminalSurface.readSelectionBounds()`** and
+  **`TerminalSurface.sendMousePressure(_:pressure:)`**, in
+  `Sources/GhosttyTerminal/Surface/TerminalSurface.swift`. The first is `nil`
+  when nothing is selected or none of it is visible, which ghostty marks with a
+  top-left pixel of `-1`. The second binds `ghostty_surface_mouse_pressure`,
+  which the wrapper did not: a deep press while the button is down is
+  ghostty's force-click, and it is the one input that ends a click sequence
+  without a click reaching a mouse-reporting program, which is what lets a
+  handle drag start a fresh selection from the end it keeps.
+- **`Sources/GhosttyTerminal/Metrics/TerminalMousePressureStage.swift`** (new)
+  — the stage, whose values are ghostty's own `input.MousePressureStage`.
+
+All three are Swift only. The binary target, its URL and its checksum are
+unchanged, so none of them needs a build or touches what the audit below
+verifies.
 
 Upstream's own workflows are left in the tree untouched and are **disabled**
 in this fork's Actions settings. In particular `weekly.yml` would otherwise
