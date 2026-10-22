@@ -150,6 +150,51 @@ public final class InMemoryTerminalSession: @unchecked Sendable {
         } ?? nil
     }
 
+    /// The whole screen as text: every row of scrollback and the active
+    /// area, top to bottom. `nil` while no surface is attached.
+    ///
+    /// Added for Tether's select-text sheet, which shows a pane's whole
+    /// history for a selection that is not bounded by the viewport.
+    ///
+    /// One read, `(SCREEN, TOP_LEFT)` to `(SCREEN, BOTTOM_RIGHT)`, unlike
+    /// ``readViewportText()``'s one read per row: that one has to keep rows
+    /// apart, and this one wants a soft-wrapped line back as one line, which
+    /// a single read gives (ghostty formats a selection with `unwrap`). Not
+    /// trimmed: ghostty's read keeps spaces a program wrote at the end of a
+    /// row, and the caller decides what to do with them.
+    ///
+    /// Reads the active screen, so on the alternate screen it is that
+    /// screen's rows alone, which have no scrollback. Not `select_all`, which
+    /// covers the same range but also sets the selection and copies it.
+    public func readScreenText() -> String? {
+        surfaceAccess.withCurrentSurface { surface -> String? in
+            let selection = ghostty_selection_s(
+                top_left: ghostty_point_s(
+                    tag: GHOSTTY_POINT_SCREEN,
+                    coord: GHOSTTY_POINT_COORD_TOP_LEFT,
+                    x: 0,
+                    y: 0
+                ),
+                bottom_right: ghostty_point_s(
+                    tag: GHOSTTY_POINT_SCREEN,
+                    coord: GHOSTTY_POINT_COORD_BOTTOM_RIGHT,
+                    x: 0,
+                    y: 0
+                ),
+                rectangle: false
+            )
+            var out = ghostty_text_s()
+            guard ghostty_surface_read_text(surface, selection, &out) else {
+                return nil
+            }
+            defer { ghostty_surface_free_text(surface, &out) }
+            guard let textPtr = out.text, out.text_len > 0 else { return "" }
+            let bytes = UnsafeBufferPointer(start: textPtr, count: Int(out.text_len))
+                .map { UInt8(bitPattern: $0) }
+            return String(decoding: bytes, as: UTF8.self)
+        } ?? nil
+    }
+
     func updateViewport(_ size: TerminalGridMetrics) {
         TerminalDebugLog.log(.metrics, "in-memory viewport update \(size.debugSummary)")
         dispatchResize(InMemoryTerminalViewport(

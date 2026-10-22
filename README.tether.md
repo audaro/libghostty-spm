@@ -114,7 +114,14 @@ every wide character, which is one character and two cells.
 - **`Sources/GhosttyTerminal/Metrics/TerminalMousePressureStage.swift`** (new)
   — the stage, whose values are ghostty's own `input.MousePressureStage`.
 
-All three are Swift only. The binary target, its URL and its checksum are
+- **`InMemoryTerminalSession.readScreenText()`**, added the same day for
+  Tether's select-text sheet, which shows a pane's whole history rather than
+  its viewport: one `ghostty_surface_read_text` from `(SCREEN, TOP_LEFT)` to
+  `(SCREEN, BOTTOM_RIGHT)`, so a soft-wrapped line comes back as one line.
+  Not `select_all`, which reads the same range but also sets the selection
+  and copies it to the clipboard.
+
+All four are Swift only. The binary target, its URL and its checksum are
 unchanged, so none of them needs a build or touches what the audit below
 verifies.
 
